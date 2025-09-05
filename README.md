@@ -13,3 +13,103 @@ The four Resnet models were trained until accuracy rates plateaued and no furthe
 
 Gastrointestinal polyps highlight the efficiency of machine learning approaches in healthcare, which have rapidly evolved.  The significance of accurate polyp detection cannot be overstated, given its direct impact on preventing and managing colorectal cancer, a major contributor to global cancer morbidity and mortality. This image segmentation model will serve as an excellent checking tool for doctors and other healthcare professionals to compensate for the possibility of human error during the process of detecting polyps in colonoscopies. Implementing this new method would not impact hospitals’ finances as it is solely software-based, with no new hardware changes needed. For future works, this project would benefit from creating a user friendly desktop application making usage as convenient as possible for healthcare professionals to utilize. Furthermore, collaboration with medical professionals and institutions for extensive validation studies on diverse patient populations would validate the robustness of the model. Continuous refinement and fine-tuning based on feedback from these studies would contribute to the model's adaptability to different clinical scenarios and ensure its reliability in real-world applications. The Resnet-34 model achieved a state-of-the-art accuracy of 96.8% in identifying gastrointestinal polyps, allowing for thorough segmentation with polyp sizes of different sizes.
 
+GENERAL SCRIPT FOR MODEL LOADING AND TRAINING:
+
+
+from fastai.basics import *
+from fastai.vision.all import *
+from fastai.callback.all import *
+import torch
+import torch.nn as nn
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.metrics import confusion_matrix
+
+# Path setup
+path_im = Path('/kaggle/input/kvair-seg/Kvasir-SEG/images')
+path_lbl = Path('/kaggle/input/kvair-seg/Kvasir-SEG/masks')
+
+# Get image files and masks
+fnames = get_image_files(path_im)
+label_names = get_image_files(path_lbl)
+
+# Get corresponding mask filenames
+get_msk = lambda o: path_lbl/f'{o.stem}{o.suffix}'
+
+# Dice coefficient functions
+def mean_dice(preds, targets):
+    n_classes = preds.shape[1]  # Assuming preds are one-hot encoded or softmax
+    preds_cls = preds.argmax(dim=1)  # Convert from probabilities to class indices
+    mean_dice_score = 0.0
+    for cls_idx in range(n_classes):
+        mean_dice_score += binary_dice_coef(preds_cls, targets, cls_idx)
+    return mean_dice_score / n_classes
+
+def binary_dice_coef(preds, targets, cls_idx):
+    preds_bin = (preds == cls_idx).float()
+    targets_bin = (targets == cls_idx).float()
+    intersection = (preds_bin * targets_bin).sum()
+    union = preds_bin.sum() + targets_bin.sum()
+    dice = 2. * intersection / (union + 1e-8)  # Epsilon to avoid division by zero
+    return dice
+
+# Define Attention Block
+class AttentionBlock(nn.Module):
+    def __init__(self, channels: int):
+        super().__init__()
+        self.attention = nn.Sequential(
+            nn.Conv2d(channels, channels, kernel_size=1, padding=0),
+            nn.Softmax(dim=1)
+        )
+
+    def forward(self, x):
+        return self.attention(x) * x
+
+# Modify Unet to include Attention Block
+def attention_unet_learner(dls, arch=resnet34, **kwargs):
+    learn = unet_learner(dls, arch, **kwargs)
+    
+    # Find the first convolutional layer in the encoder
+    # The `learn.model` will have the U-Net architecture, and we'll add the attention block to the first few convolutional layers
+    learn.model[0][0] = AttentionBlock(learn.model[0][0].conv[0].out_channels)
+    
+    return learn
+
+# Define DataBlock
+codes = ['n', 'y']
+cancer = DataBlock(
+    blocks=(ImageBlock, MaskBlock(codes)),
+    get_items=get_image_files,
+    splitter=RandomSplitter(valid_pct=0.2),
+    get_y=get_msk,
+    item_tfms=[Resize(128), FlipItem(p=0.5)],  # Fix resize and flip transformations
+    batch_tfms=[Normalize.from_stats(*imagenet_stats), IntToFloatTensor(div_mask=255)]  # Normalize and scale masks
+)
+
+# Data loaders
+source_p = Path('/kaggle/input/kvair-seg/Kvasir-SEG')
+dls = cancer.dataloaders(source_p, bs=2)
+
+# Create learner with attention U-Net
+learn = attention_unet_learner(dls, metrics=[mean_dice])
+
+# Train the model
+learn.fit_one_cycle(5)
+
+# Visualizing Results (Accuracy/Loss Over Epochs, Confusion Matrix, ROC, etc.)
+# Visualize Training Loss
+plt.plot(range(len(learn.recorder.losses)), learn.recorder.losses)
+plt.title('Training Loss Over Epochs')
+plt.xlabel('Epoch')
+plt.ylabel('Loss')
+plt.show()
+
+# Assuming you have true labels (y_true) and predicted labels (y_pred) from the model
+# Get predictions (example)
+y_true, y_pred = learn.get_preds()
+
+# Compute confusion matrix
+conf_matrix = confusion_matrix(y_true.argmax(dim=1), y_pred.argmax(dim=1))
+sns.heatmap(conf_matrix, annot=True, fmt='d', cmap='Blues')
+plt.title('Confusion Matrix')
+plt.show()
